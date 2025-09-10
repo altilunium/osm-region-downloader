@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Overpass — Download objects inside relation area</title>
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0}
+    body{margin:0;padding:22px;background:#f6f7fb;color:#0f172a}
+    .wrap{max-width:930px;margin:0 auto;background:#fff;border-radius:12px;padding:20px;box-shadow:0 6px 24px rgba(12,18,32,0.08)}
+    h1{font-size:20px;margin:0 0 8px}
+    p.lead{margin:0 0 18px;color:#334155}
+    label{display:block;font-size:13px;margin:12px 0 6px;color:#0f172a}
+    input[type=text], textarea, select{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #e6e9ef;font-size:13px}
+    .row{display:flex;gap:12px}
+    .col{flex:1}
+    .controls{display:flex;gap:8px;margin-top:12px}
+    button{background:#0b75ff;color:#fff;border:0;padding:10px 14px;border-radius:8px;font-weight:600;cursor:pointer}
+    button.secondary{background:#eef2ff;color:#0b75ff;border:1px solid #dbeafe;font-weight:600}
+    .muted{color:#64748b;font-size:13px}
+    .output{margin-top:14px;padding:12px;border-radius:8px;background:#f8fafc;border:1px solid #e6eef8;font-size:13px}
+    pre{white-space:pre-wrap;word-break:break-word;margin:0}
+    .small{font-size:12px;color:#475569}
+    .footer{margin-top:18px;color:#94a3b8;font-size:13px}
+    .inline{display:inline-block;vertical-align:middle}
+    .flex-between{display:flex;justify-content:space-between;align-items:center}
+    .danger{color:#b91c1c}
+    .success{color:#065f46}
+    .hint{background:#fff7ed;padding:10px;border-radius:8px;border:1px solid #ffedd5;margin-top:10px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="flex-between">
+      <div>
+        <h1>Download OSM objects inside a relation's area</h1>
+        <p class="lead">Enter an OSM relation ID (for example an administrative boundary). This page converts the relation to an Overpass area and fetches all nodes, ways and relations geographically inside it.</p>
+      </div>
+    </div>
+
+    <label for="relationId">Relation ID</label>
+    <input id="relationId" type="text" placeholder="e.g. 186579 (Jakarta) or 62786" />
+
+    <label for="filters">Optional Overpass tag filter (to limit size). Example: <span class="muted">["building"], ["highway"]</span></label>
+    <input id="filters" type="text" placeholder='Leave empty for everything. Examples: "[\"building\"]" or "[\"amenity\"~\"school|university\"]"' />
+
+    <label for="format">Output format</label>
+    <select id="format">
+      <option value="json">Overpass JSON (with geometry where available)</option>
+      <option value="xml">OSM XML</option>
+      <option value="raw">Raw Overpass output (text)</option>
+    </select>
+
+    <div class="row" style="margin-top:12px">
+      <div class="col">
+        <label for="apiUrl">Overpass API endpoint</label>
+        <input id="apiUrl" type="text" value="https://overpass-api.de/api/interpreter" />
+      </div>
+      <div style="width:220px">
+        <label for="timeout">Timeout (seconds)</label>
+        <input id="timeout" type="text" value="180" />
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="downloadBtn">Fetch and download</button>
+      <button id="previewBtn" class="secondary">Show generated query</button>
+      <button id="copyBtn" class="secondary">Copy query to clipboard</button>
+      <div style="flex:1"></div>
+      <div class="small muted">No external libraries. Large areas may time out. Use a tag filter to limit results.</div>
+    </div>
+
+    <div id="status" class="output" style="display:none;margin-top:14px"></div>
+
+    <div id="preview" class="output" style="display:none;margin-top:12px"><pre id="queryPreview"></pre></div>
+
+    <div class="footer">If the result is extremely large, consider restricting with a tag filter or downloading in tiles.</div>
+  </div>
+
+<script>
+(function(){
+  const el = id => document.getElementById(id);
+  const relationInput = el('relationId');
+  const filtersInput = el('filters');
+  const apiUrlInput = el('apiUrl');
+  const timeoutInput = el('timeout');
+  const formatSelect = el('format');
+  const downloadBtn = el('downloadBtn');
+  const previewBtn = el('previewBtn');
+  const copyBtn = el('copyBtn');
+  const status = el('status');
+  const preview = el('preview');
+  const queryPreview = el('queryPreview');
+
+  function showStatus(html, level){
+    status.style.display = 'block';
+    status.innerHTML = html;
+    status.className = 'output';
+    if(level==='error') status.classList.add('danger');
+    if(level==='ok') status.classList.add('success');
+  }
+
+  function buildQuery(relationId, tagFilter, outFormat, timeoutSeconds){
+    // We use map_to_area then select nodes/ways/relations inside area.
+    // Add optional tag filter inside the parentheses, e.g. way(area.searchArea)["building"];
+    const header = (outFormat === 'xml') ? '[out:xml]' : '[out:json]';
+    const timeout = '[timeout:' + Math.max(25, parseInt(timeoutSeconds||60,10)) + ']';
+
+    // Compose filter string; user must provide valid Overpass tag expressions if used.
+    let nodeFilter = 'node(area.searchArea)';
+    let wayFilter = 'way(area.searchArea)';
+    let relFilter = 'relation(area.searchArea)';
+    if(tagFilter && tagFilter.trim().length){
+      // Insert filter after each element name
+      nodeFilter = 'node(area.searchArea)'+ tagFilter;
+      wayFilter = 'way(area.searchArea)'+ tagFilter;
+      relFilter = 'relation(area.searchArea)'+ tagFilter;
+    }
+
+    // For JSON output include geometry for ways to make it more useful. For XML we let Overpass return normal xml.
+    const outLine = (outFormat === 'json') ? 'out body geom;' : 'out meta;';
+
+    const query = `${header}${timeout};\nrelation(${relationId});\nmap_to_area -> .searchArea;\n(\n  ${nodeFilter};\n  ${wayFilter};\n  ${relFilter};\n);\n${outLine}\n>;\nout meta qt;`;
+    return query;
+  }
+
+  function fetchOverpass(apiUrl, query, expectRaw){
+    const controller = new AbortController();
+    const start = Date.now();
+    showStatus('Sending request to ' + apiUrl + ' — this may take a while for large areas.');
+
+    return fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: 'data=' + encodeURIComponent(query),
+      signal: controller.signal
+    }).then(async res => {
+      const elapsed = ((Date.now() - start)/1000).toFixed(1);
+      if(!res.ok) throw new Error('HTTP '+res.status+' — ' + await res.text());
+
+      const contentType = res.headers.get('content-type') || '';
+      let data;
+      if(expectRaw) {
+        data = await res.text();
+      } else if(contentType.includes('json')){
+        data = await res.json();
+      } else {
+        data = await res.text();
+      }
+
+      return { data, elapsed, contentType };
+    });
+  }
+
+  function downloadBlob(filename, data, mime){
+    const blob = new Blob([data], { type: mime || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; document.body.appendChild(a);
+    a.click(); a.remove(); URL.revokeObjectURL(url);
+  }
+
+  previewBtn.addEventListener('click', ()=>{
+    const rid = relationInput.value.trim();
+    if(!rid){ showStatus('Please enter a relation ID.', 'error'); return; }
+    const q = buildQuery(rid, filtersInput.value.trim(), formatSelect.value, timeoutInput.value);
+    queryPreview.textContent = q;
+    preview.style.display = 'block';
+    showStatus('Preview ready. You can copy or run the query.', 'ok');
+  });
+
+  copyBtn.addEventListener('click', async ()=>{
+    const rid = relationInput.value.trim();
+    if(!rid){ showStatus('Please enter a relation ID.', 'error'); return; }
+    const q = buildQuery(rid, filtersInput.value.trim(), formatSelect.value, timeoutInput.value);
+    try{ await navigator.clipboard.writeText(q); showStatus('Query copied to clipboard.', 'ok'); }
+    catch(e){ showStatus('Copy failed: ' + e.message, 'error'); }
+  });
+
+  downloadBtn.addEventListener('click', async ()=>{
+    const relationId = relationInput.value.trim();
+    if(!relationId){ showStatus('Enter a relation ID before fetching.', 'error'); return; }
+
+    const apiUrl = apiUrlInput.value.trim() || 'https://overpass-api.de/api/interpreter';
+    const outFormat = formatSelect.value;
+    const timeout = timeoutInput.value || '180';
+    const filter = filtersInput.value.trim();
+
+    const query = buildQuery(relationId, filter, outFormat, timeout);
+
+    showStatus('Query built. Sending request...', 'ok');
+
+    try{
+      const expectRaw = (outFormat === 'raw');
+      const res = await fetchOverpass(apiUrl, query, expectRaw);
+
+      const size = (typeof res.data === 'string') ? res.data.length : JSON.stringify(res.data).length;
+      const friendlySize = size < 1024 ? size + ' B' : (size/1024).toFixed(1) + ' KB';
+
+      let filenameBase = `overpass_relation_${relationId}`;
+      const now = new Date().toISOString().replace(/[:.]/g,'-');
+      filenameBase += '_' + now;
+
+      if(outFormat === 'json'){
+        const text = JSON.stringify(res.data, null, 2);
+        downloadBlob(filenameBase + '.json', text, 'application/json');
+        showStatus(`Downloaded JSON (${friendlySize}) — request time: ${res.elapsed}s`, 'ok');
+      } else if(outFormat === 'xml'){
+        // If server returned JSON despite header, convert to string.
+        const text = (typeof res.data === 'string') ? res.data : JSON.stringify(res.data);
+        downloadBlob(filenameBase + '.osm', text, 'application/xml');
+        showStatus(`Downloaded OSM XML (${friendlySize}) — request time: ${res.elapsed}s`, 'ok');
+      } else {
+        const text = (typeof res.data === 'string') ? res.data : JSON.stringify(res.data);
+        downloadBlob(filenameBase + '.txt', text, 'text/plain');
+        showStatus(`Downloaded raw output (${friendlySize}) — request time: ${res.elapsed}s`, 'ok');
+      }
+
+    } catch(err){
+      showStatus('Request failed: ' + err.message, 'error');
+    }
+  });
+})();
+</script>
+</body>
+</html>
